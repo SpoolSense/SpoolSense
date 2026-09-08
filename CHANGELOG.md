@@ -4,7 +4,7 @@ All notable changes to SpoolSense are documented here.
 
 ---
 
-## [1.9.0] - UNRELEASED
+## [1.9.0] - 2026-09-07
 
 ### Changed
 
