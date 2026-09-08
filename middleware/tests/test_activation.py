@@ -17,7 +17,7 @@ sys.modules.setdefault("watchdog.observers", MagicMock())
 sys.modules.setdefault("watchdog.events", MagicMock())
 
 import app_state  # noqa: E402
-from activation import activate_spool  # noqa: E402
+from activation import activate_spool, _cache_pending_spool  # noqa: E402
 from publishers.klipper import _validate_color_hex, _validate_material  # noqa: E402
 
 
@@ -368,6 +368,60 @@ class TestBuildSpoolEventScannerId(unittest.TestCase):
     def test_unknown_only_when_nothing_available(self):
         ev = self._event({"action": "toolhead_stage"}, None, None)
         self.assertEqual(ev.scanner_id, "unknown")
+
+
+class TestPendingBaseline(unittest.TestCase):
+    """#119 — the staged pending dict carries the chosen deduction baseline
+    separately from the display weight."""
+
+    def setUp(self):
+        app_state.state_lock = threading.Lock()
+        app_state.pending_spool_afc = None
+        app_state.pending_spool_toolhead = None
+        app_state.pending_spool_toolhead_gen = 0
+
+    def test_baseline_stored_alongside_display_weight(self):
+        _cache_pending_spool("afc", "FF0000", "PLA", 1000.0, None,
+                             uid="AABB11", baseline_g=700.0)
+        pending = app_state.pending_spool_afc
+        self.assertEqual(pending["remaining_g"], 1000.0)   # display untouched
+        self.assertEqual(pending["baseline_g"], 700.0)
+
+    def test_baseline_may_be_none(self):
+        _cache_pending_spool("afc", "FF0000", "PLA", 1000.0, None,
+                             uid="AABB11", baseline_g=None)
+        self.assertIsNone(app_state.pending_spool_afc["baseline_g"])
+
+
+class TestActivateFromScanBaselineWiring(unittest.TestCase):
+    """#119 — _activate_from_scan must compute the Spoolman-preferred
+    baseline and pass it through to _route_staged/_cache_pending_spool
+    separately from the tag-preferred display weight. No prior test drove
+    _activate_from_scan itself (choose_deduction_baseline and _route_staged
+    are only exercised directly elsewhere), so reverting the wiring at
+    activation.py:305-306 or the _route_staged call would leave every other
+    test green."""
+
+    def setUp(self) -> None:
+        _setup_app_state()
+
+    def test_afc_stage_pending_gets_spoolman_baseline_and_tag_remaining(self) -> None:
+        from activation import _activate_from_scan
+        from state.models import ScanEvent, SpoolInfo
+        scan = ScanEvent(
+            source="opentag3d", target_id="T0", scanned_at="now",
+            uid="AABB11", present=True, tag_data_valid=True,
+            remaining_weight_g=1000.0,
+        )
+        # spoolman_id stays None (default) — Spoolman activation is skipped
+        # so this test isolates baseline wiring from the activation call.
+        spool_info = SpoolInfo(spool_uid="AABB11", source="spoolman",
+                               spoolman_remaining_g=800.0)
+        with patch("activation.notify_observers"):
+            _activate_from_scan({"action": "afc_stage"}, scan, spool_info=spool_info)
+        pending = app_state.pending_spool_afc
+        self.assertEqual(pending["baseline_g"], 800.0)
+        self.assertEqual(pending["remaining_g"], 1000.0)
 
 
 if __name__ == "__main__":

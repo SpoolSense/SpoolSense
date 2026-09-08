@@ -83,7 +83,7 @@ def _record_spool_tracking(
     # Check low-spool threshold at scan time — if a new spool has plenty of
     # filament, this also clears any latched low-spool state from the same
     # device so the LED stops breathing after a spool swap.
-    if device_id:
+    if device_id and remaining is not None:
         _check_low_spool(device_id, remaining)
 
 
@@ -160,6 +160,7 @@ def _handle_uid_only_tag(client: mqtt.Client, scanner_cfg: dict, uid: str, topic
             "afc" if action == "afc_stage" else "toolhead",
             color_hex, material, remaining, spool_id,
             uid=uid, device_id=device_id or "", tag_format="uid_only",
+            baseline_g=remaining,
         )
         logger.info(f"[{action}] Staged spool {spool_id} ({name}) for assignment")
         # Observer channels (MQTT event stream) still see staged scans even
@@ -204,9 +205,10 @@ def _enrich_from_spoolman(scan: ScanEvent, topic: str) -> SpoolInfo | None:
 
 
 def _handle_tag_writeback(scan: ScanEvent, spool_info: SpoolInfo | None,
-                          device_id: str | None, client: mqtt.Client) -> None:
+                          device_id: str | None, client: mqtt.Client,
+                          tag_format: str | None = None) -> None:
     """Check if tag weight is stale and write updated data back to the scanner."""
-    write_plan = build_write_plan(scan, spool_info, device_id=device_id)
+    write_plan = build_write_plan(scan, spool_info, device_id=device_id, tag_format=tag_format)
     if not write_plan:
         return
     if app_state.cfg.get("tag_writeback_enabled"):
@@ -253,17 +255,19 @@ def _handle_rich_tag(client: mqtt.Client, scanner_cfg: dict, payload: dict, topi
         device_id = _extract_scanner_device_id(topic)
         _activate_from_scan(scanner_cfg, scan, spool_info=spool_info, device_id=device_id)
 
-        # Record initial weight for UPDATE_TAG filament deduction
-        # tag_format comes from the scanner payload — tells us if this tag supports weight writes
+        # Record the deduction baseline for UPDATE_TAG — Spoolman-preferred,
+        # tag fallback, None for unmatched nominal tags (#119)
         tag_format = payload.get("tag_format", "unknown")
+        from tracking_store import choose_deduction_baseline
         _record_spool_tracking(
             target, scan.uid.lower() if scan.uid else None, device_id or "",
-            scan.remaining_weight_g, scan.diameter_mm, scan.density,
+            choose_deduction_baseline(scan, spool_info),
+            scan.diameter_mm, scan.density,
             tag_format=tag_format,
         )
 
         # Write updated weight back to tag if stale
-        _handle_tag_writeback(scan, spool_info, device_id, client)
+        _handle_tag_writeback(scan, spool_info, device_id, client, tag_format=tag_format)
 
     except NotImplementedError as e:
         logger.warning(f"Tag format not yet supported: {e}")
